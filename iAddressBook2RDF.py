@@ -240,12 +240,26 @@ if __name__ == '__main__':
         if sys.platform.startswith('win'):
             try:
                 from win32com.shell import shellcon, shell
-                args.input = '%s/%s/%s' % (
+                from glob import glob
+                folder_glob = '%s/%s/*/%s' % (
                     shell.SHGetFolderPath(0, shellcon.CSIDL_APPDATA, 0, 0),
-                    '/Apple Computer/MobileSync/Backup/1f69f1a9266e81eac36549fb3038f0493e52efc9',
+                    'Apple Computer/MobileSync/Backup',
                     '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
+                gl = glob(folder_glob)
+                args.input = gl[-1] if gl else None
             except ImportError:
                 pass
+        elif sys.platform.startswith('darwin'):
+            import os
+            home = os.getenv('HOME')
+            if home:
+                from glob import glob
+                folder_glob = '%s/%s/*/%s' % (
+                    home,
+                    'Library/Application Support/MobileSync/Backup',
+                    '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
+                gl = glob(folder_glob)
+                args.input = gl[-1] if gl else None
 
     if not args.input:
         parser.error('Missing input file!')
