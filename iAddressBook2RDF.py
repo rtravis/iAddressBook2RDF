@@ -246,7 +246,7 @@ if __name__ == '__main__':
                     'Apple Computer/MobileSync/Backup',
                     '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
                 gl = glob(folder_glob)
-                args.input = gl[-1] if gl else None
+                args.input = gl[0] if gl else None
             except ImportError:
                 pass
         elif sys.platform.startswith('darwin'):
@@ -259,7 +259,7 @@ if __name__ == '__main__':
                     'Library/Application Support/MobileSync/Backup',
                     '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
                 gl = glob(folder_glob)
-                args.input = gl[-1] if gl else None
+                args.input = gl[0] if gl else None
 
     if not args.input:
         parser.error('Missing input file!')
