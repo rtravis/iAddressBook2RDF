@@ -167,9 +167,10 @@ class ABPersonToRDF(object):
                 mve.parent_id = mv.UID
             LEFT JOIN ABMultiValueEntryKey mvek ON
                 mvek.ROWID = mve.key
-            WHERE mv.record_id=?;
+            WHERE mv.record_id=?
+            ORDER BY 1;
         """
-
+        last_mv_uid = None
         person_blank = '_:p%d' % (person_id)
         cur = self.db_connection.cursor()
         for row in cur.execute(query, (person_id,)):
@@ -193,10 +194,11 @@ class ABPersonToRDF(object):
             elif prop_type == 5:
                 # street address
                 address_blank = '_:p%dad%d' % (person_id, uid)
-                trip = '%s %s %s .' % (person_blank,
-                                     qname_to_uri('vcard:address'),
-                                     address_blank)
-                self._line_out(trip)
+                if uid != last_mv_uid:
+                    trip = '%s %s %s .' % (person_blank,
+                                         qname_to_uri('vcard:address'),
+                                         address_blank)
+                    self._line_out(trip)
                 qn = get_multi_value_entry_qname(row[6])
                 if qn:
                     trip = '%s %s "%s" .' % (address_blank,
@@ -210,6 +212,7 @@ class ABPersonToRDF(object):
                                      qname_to_uri(prop_name),
                                      escape_literal(prop_val))
                 self._line_out(trip)
+            last_mv_uid = uid
 
     def _process_phone_number(self, person_blank, phone_number, phone_type):
         # process phone number
