@@ -14,9 +14,11 @@
 import argparse
 import sqlite3
 import sys
+import datetime
 
 qnames_prefix_map = {
     'rdf' : 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+    'rdfs' : 'http://www.w3.org/2000/01/rdf-schema#',    
     'foaf' : 'http://xmlns.com/foaf/0.1/',
     'abp' : 'http://www.apple.com/ABPerson#',
     'vcard' : 'http://www.w3.org/2006/vcard/ns#',
@@ -33,7 +35,15 @@ def qname_to_uri(rel):
         rel = rel + '>'
     return rel
 
-def escape_literal(s):
+
+def format_value(s, qname=None):
+    # convert Apple date fields to ISO 8601 date representation
+    if qname in [ 'abp:CreationDate', 'abp:ModificationDate' ]:
+        s = datetime.datetime.fromtimestamp(978307200 + float(s)).strftime("%Y-%m-%d %H:%M:%S")
+    elif qname == 'foaf:birthday':
+        dt = datetime.datetime.fromtimestamp(978307200 + float(s))
+        s = '--%02d-%02d' % (dt.month, dt.day)
+
     if s is None:
         return ''
     try:
@@ -45,6 +55,7 @@ def escape_literal(s):
     s = s.replace("\"", "\\\"")
     s = s.replace("\n", "\\n")
     return s
+
 
 ab_person_column_map = {
     'ROWID' : None,
@@ -124,7 +135,7 @@ class ABPersonToRDF(object):
                 tripple = '%s %s "%s" .' % (
                                     blank_node,
                                     qname_to_uri(qname),
-                                    escape_literal(row[i]))
+                                    format_value(row[i], qname))
                 self._line_out(tripple)
             self._process_person_multi_values(person_id)
 
@@ -203,14 +214,14 @@ class ABPersonToRDF(object):
                 if qn:
                     trip = '%s %s "%s" .' % (address_blank,
                                              qname_to_uri(qn),
-                                             escape_literal(prop_val))
+                                             format_value(prop_val, qn))
                     self._line_out(trip)
             else:
                 # unknown property
                 prop_name = 'abp:prop_%s' % (prop_type)
                 trip = '%s %s "%s" .' % (person_blank,
                                      qname_to_uri(prop_name),
-                                     escape_literal(prop_val))
+                                     format_value(prop_val, prop_name))
                 self._line_out(trip)
             last_mv_uid = uid
 
@@ -221,6 +232,12 @@ class ABPersonToRDF(object):
                              qname_to_uri('foaf:phone'),
                              phone_uri)
         self._line_out(trip)
+
+        trip = '%s %s "%s" .' % (phone_uri,
+                               qname_to_uri('rdfs:label'),
+                               phone_number)
+        self._line_out(trip)
+
         # phone type could be like: _$!<Mobile>!$_, _$!<Work>!$_, etc.
         if phone_type and len(phone_type) > 8:
             phone_type = phone_type[4:-4]
