@@ -12,9 +12,10 @@
 # Public License version 2.1
 
 import argparse
+import datetime
 import sqlite3
 import sys
-import datetime
+
 
 qnames_prefix_map = {
     'rdf' : 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
@@ -158,13 +159,13 @@ class ABPerson(dict):
         if fn:
             self['vcard:fn'] = format_literal(fn)
 
-    def output_ntriples(self, out):
-        bnode = '_:p%d' % (self.id)
+    def output_ntriples(self, out, bnode_tag):
+        bnode = '_:%sp%d' % (bnode_tag, self.id)
         for k in self:
             if k.startswith('multival:'):
                 mv = self[k]
                 rel = mv['mv_relation_name']
-                bnode2 = bnode + '_' + k[len('multival:'):]
+                bnode2 = bnode + 'm' + k[len('multival:'):]
                 output_triple(out, bnode, rel, bnode2)
                 for k2 in mv:
                     if k2 == 'mv_relation_name':
@@ -183,6 +184,7 @@ def multi_value_prop_class_qname(class_name, class_label):
 class ABPersonToRDF(object):
     def __init__(self, db_name, output_file_name=None):
         self.db_connection = sqlite3.connect(db_name)
+        self.rand_tag = ('%x' % (abs(hash(db_name))))[:8]
         if output_file_name is not None:
             self.out = open(output_file_name, 'wb')
         else:
@@ -204,7 +206,7 @@ class ABPersonToRDF(object):
             self._process_person_multi_values(person)
             person.generate_full_name()
 
-            person.output_ntriples(self.out)
+            person.output_ntriples(self.out, self.rand_tag)
 
     """ process the field of an ABPerson record, store results in person  """
     def _process_ab_person_column(self, col_name, col_val, person):
@@ -246,6 +248,15 @@ class ABPersonToRDF(object):
             self.out.write(('%s\n' % (s)).encode('UTF-8'))
         except TypeError:
             self.out.write('%s\n' % (s))
+
+    def _to_telephone_uri(self, phoneNo):
+        phoneNo = phoneNo.replace(' ', '');
+        if isinstance(phoneNo, bytes):
+            phoneNo = phoneNo.replace(u'\xc2\xa0', '');
+        else:
+            phoneNo = phoneNo.replace(u'\xa0', '');
+        return '<tel:%s>' % (phoneNo)
+
 
     def _process_person_multi_values(self, person):
         # mv.property: 3/phone number 16/ringer 5/address 4/e-mail address
@@ -292,7 +303,7 @@ class ABPersonToRDF(object):
 
             if prop_type == 3:
                 # process phone number
-                phone_uri = '<tel:%s>' % (prop_val.replace(' ', ''))
+                phone_uri = self._to_telephone_uri(prop_val)
 
                 mv_obj['mv_relation_name'] = 'vcard:hasTelephone'
                 mv_obj['vcard:hasValue'] = phone_uri
