@@ -25,6 +25,7 @@ qnames_prefix_map = {
     'gn' : 'http://www.geonames.org/ontology#'
 }
 
+
 def qname_to_uri(rel):
     p = rel.partition(':')
     if p[1] == ':' and p[0] in qnames_prefix_map:
@@ -43,6 +44,21 @@ def format_literal(s):
     s = s.replace("\"", "\\\"")
     s = s.replace("\n", "\\n")
     return '"%s"' % (s)
+
+
+def format_uri(s):
+    return '<' + s + '>'
+
+
+# convert Apple date fields to ISO 8601 date representation
+def apple_date_to_iso_8601(adt, is_timestamp=True):
+    if is_timestamp:
+        return datetime.datetime.fromtimestamp(
+                    978307200 + float(adt)).strftime("%Y-%m-%d %H:%M:%S")
+
+    dt = datetime.datetime.fromtimestamp(978307200 + float(adt))
+    return '--%02d-%02d' % (dt.month, dt.day)
+
 
 """ map ABPerson table columns to RDF predicates """
 ab_person_column_map = {
@@ -77,28 +93,13 @@ ab_person_column_map = {
     'LastSortSection' : None,
     'FirstSortLanguageIndex' : None,
     'LastSortLanguageIndex' : None,
-    'PersonLink' : 'vcard:hasURL',
+    'PersonLink' : 'abp:PersonLink',
     'ImageURI' : 'vcard:hasPhoto',
     'IsPreferredName' : None,
     'guid' : 'abp:x-abuid',
     'PhonemeData' : 'abp:PhonemeData'
 }
 
-""" map ABMultiValueEntry.key values to property names """
-ab_multi_value_entry_map = {
-    1 : 'vcard:street-address',
-    2 : 'vcard:country-name',
-    3 : 'vcard:postal-code',
-    4 : 'vcard:locality',
-    5 : 'vcard:region',
-    6 : 'gn:countryCode'
-}
-
-def get_multi_value_entry_qname(nkey):
-    try:
-        return ab_multi_value_entry_map[nkey]
-    except KeyError:
-        return None
 
 """ map ABPerson.Kind values vcard:Kind subclasses """
 ab_object_kind_map = {
@@ -108,11 +109,71 @@ ab_object_kind_map = {
     # 3? : 'vcard:Location'
 }
 
+
 def get_object_kind_qname(nkey):
     try:
         return ab_object_kind_map[nkey]
     except KeyError:
         return 'vcard:Kind'
+
+
+def _to_telephone_uri(phoneNo):
+    phoneNo = phoneNo.replace(' ', '');
+    if isinstance(phoneNo, bytes):
+        phoneNo = phoneNo.replace(u'\xc2\xa0', '');
+    else:
+        phoneNo = phoneNo.replace(u'\xa0', '');
+    return '<tel:%s>' % (phoneNo)
+
+
+def _process_has_telephone(objPropDict, val, _):
+    # process phone number
+    objPropDict['vcard:hasValue'] = _to_telephone_uri(val)
+    objPropDict['rdfs:label'] = format_literal(val)
+
+
+def _process_has_email(objPropDict, val, _):
+    # e-mail address
+    objPropDict['vcard:hasValue'] = '<mailto:%s>' % (val)
+
+
+def _process_url(objPropDict, val, _):
+    objPropDict['vcard:hasValue'] = format_uri(val)
+
+
+def _process_literal(objPropDict, val, _):
+    objPropDict['vcard:hasValue'] = format_literal(val)
+
+
+def _process_literal_date(objPropDict, val, _):
+    objPropDict['vcard:hasValue'] = format_literal(apple_date_to_iso_8601(val, False))
+
+
+def _process_multi_value_entry(objPropDict, val, mve_relation):
+    assert(mve_relation)
+    if mve_relation == 'vcard:url':
+        objPropDict[mve_relation] = format_uri(val)
+    else:
+        objPropDict[mve_relation] = format_literal(val)
+
+
+def _get_mv_property_type_qname(mv_property):
+    prop_type_map = {
+        3 : ('vcard:hasTelephone', _process_has_telephone),
+        4 : ('vcard:hasEmail', _process_has_email),
+        5 : ('vcard:hasAddress', _process_multi_value_entry),
+        16 : ('vcard:sound', _process_literal),
+        22 : ('vcard:url', _process_url),
+        23 : ('abp:relatedName', _process_literal),
+        12 : ('abp:relatedDate', _process_literal_date),
+        46 : ('abp:socialProfile', _process_multi_value_entry),
+        13 : ('vcard:hasInstantMessage', _process_multi_value_entry)
+    }
+
+    try:
+        return prop_type_map[mv_property]
+    except KeyError:
+        return 'abp:x-prop_%s' % (mv_property)
 
 
 def output_triple(out, subj, pred, obj):
@@ -137,53 +198,62 @@ def output_triple(out, subj, pred, obj):
         out.write('%s\n' % (triple))
 
 
-class ABPerson(dict):
+def translate_category_label(categ_label):
+    # category label could be like: _$!<Mobile>!$_, _$!<Work>!$_, etc.
+    # category labels like: iPhone, Twitter, Facebook etc. are not translated
+    if not categ_label:
+        return None
+    if len(categ_label) > 8 and categ_label.startswith('_$!<'):
+        categ_label = categ_label[4:-4]
+
+    return '"' + categ_label + '"'
+
+
+
+class ABPerson():
     def __init__(self, person_id=None):
-        super(ABPerson, self).__init__()
         self.id = person_id
+        self.values = {} # single values (birthday, first name, organization, etc.)
+        self.multivalues = {} # multi values (phone#s, emails, addresses, etc.)
 
     def __str__(self, *args, **kwargs):
         return object.__str__(self, *args, **kwargs)
 
     def generate_full_name(self):
         fn = ''
-        if 'vcard:given-name' in self:
-            fn += self['vcard:given-name'].strip('"')
+        if 'vcard:given-name' in self.values:
+            fn += self.values['vcard:given-name'].strip('"')
         if fn:
             fn += ' '
-        if 'vcard:family-name' in self:
-            fn += self['vcard:family-name'].strip('"')
-        if not fn and 'vcard:organization-name' in self:
-            fn += self['vcard:organization-name'].strip('"')
+        if 'vcard:family-name' in self.values:
+            fn += self.values['vcard:family-name'].strip('"')
+        if not fn and 'vcard:organization-name' in self.values:
+            fn += self.values['vcard:organization-name'].strip('"')
         fn = fn.strip()
         if fn:
-            self['vcard:fn'] = format_literal(fn)
+            self.values['vcard:fn'] = format_literal(fn)
 
     def output_ntriples(self, out, bnode_tag):
-        bnode = '_:%sp%d' % (bnode_tag, self.id)
-        for k in self:
-            if k.startswith('multival:'):
-                mv = self[k]
-                rel = mv['mv_relation_name']
-                bnode2 = bnode + 'm' + k[len('multival:'):]
-                output_triple(out, bnode, rel, bnode2)
-                for k2 in mv:
-                    if k2 == 'mv_relation_name':
-                        continue
-                    output_triple(out, bnode2, k2, mv[k2])
-            else:
-                output_triple(out, bnode, k, self[k])
+        person_bnode = '_:%sp%d' % (bnode_tag, self.id)
+        for k in self.values:
+            output_triple(out, person_bnode, k, self.values[k])
 
-def multi_value_prop_class_qname(class_name, class_label):
-    # class label could be like: _$!<Mobile>!$_, _$!<Work>!$_, etc.
-    if class_label and len(class_label) > 8:
-        class_label = class_label[4:-4]
-        return 'abp:' + class_label
+        for k in self.multivalues:
+            mvid, mvrel = k
+            mvprops = self.multivalues[k]
+            if not mvprops:
+                continue
+            mvbnode = person_bnode + 'm' + str(mvid)
+            output_triple(out, person_bnode, mvrel, mvbnode)
+            for m in mvprops:
+                output_triple(out, mvbnode, m, mvprops[m])
 
 
 class ABPersonToRDF(object):
     def __init__(self, db_name, output_file_name=None):
         self.db_connection = sqlite3.connect(db_name)
+        self.ab_multi_value_entry_map = self._build_multi_value_entry_map(
+                                                            self.db_connection)
         self.rand_tag = ('%x' % (abs(hash(db_name))))[:8]
         if output_file_name is not None:
             self.out = open(output_file_name, 'wb')
@@ -209,7 +279,8 @@ class ABPersonToRDF(object):
             person.output_ntriples(self.out, self.rand_tag)
 
     """ process the field of an ABPerson record, store results in person  """
-    def _process_ab_person_column(self, col_name, col_val, person):
+    @staticmethod
+    def _process_ab_person_column(col_name, col_val, person):
         if col_val is None:
             return
 
@@ -221,25 +292,27 @@ class ABPersonToRDF(object):
             return
 
         if relation == 'abp:Kind':
-            person['rdf:type'] = get_object_kind_qname(col_val)
+            person.values['rdf:type'] = get_object_kind_qname(col_val)
             return
 
         if relation == 'abp:StoreID' and col_val == 0:
             return
 
-        if relation == 'vcard:hasURL' and col_val == -1:
-            return
+        if relation == 'abp:PersonLink':
+            if col_val == -1:
+                return
+            else:
+                # col_val points to an entry in the ABPersonLink table
+                col_val = str(col_val)
 
         # convert Apple date fields to ISO 8601 date representation
         if relation == 'vcard:rev':
-            col_val = datetime.datetime.fromtimestamp(
-                        978307200 + float(col_val)).strftime("%Y-%m-%d %H:%M:%S")
+            col_val = apple_date_to_iso_8601(col_val, True)
         elif relation == 'vcard:bday':
-            dt = datetime.datetime.fromtimestamp(978307200 + float(col_val))
-            col_val = '--%02d-%02d' % (dt.month, dt.day)
+            col_val = apple_date_to_iso_8601(col_val, False)
 
         # set the property
-        person[relation] = format_literal(col_val)
+        person.values[relation] = format_literal(col_val)
 
 
     def _line_out(self, s):
@@ -249,17 +322,39 @@ class ABPersonToRDF(object):
         except TypeError:
             self.out.write('%s\n' % (s))
 
-    def _to_telephone_uri(self, phoneNo):
-        phoneNo = phoneNo.replace(' ', '');
-        if isinstance(phoneNo, bytes):
-            phoneNo = phoneNo.replace(u'\xc2\xa0', '');
-        else:
-            phoneNo = phoneNo.replace(u'\xa0', '');
-        return '<tel:%s>' % (phoneNo)
+    def _build_multi_value_entry_map(self, db_connection):
+        query = 'select ROWID, value from ABMultiValueEntryKey'
+        cur = db_connection.cursor()
+        remap = {
+            'Street': 'vcard:street-address',
+            'Country': 'vcard:country-name',
+            'ZIP': 'vcard:postal-code',
+            'City': 'vcard:locality',
+            'State': 'vcard:region',
+            'CountryCode': 'gn:countryCode',
+            'username': 'abp:username',
+            'service': 'abp:service',
+            'url': 'vcard:url'
+        }
+
+        mve_map = {}
+        for row in cur.execute(query):
+            try:
+                mve_map[row[0]] = remap[row[1]]
+            except KeyError:
+                mve_map[row[0]] = 'abp:' + row[1]
+        return mve_map
+
+    def _get_multi_value_entry_qname(self, nkey):
+        try:
+            return self.ab_multi_value_entry_map[nkey]
+        except KeyError:
+            return None
 
 
     def _process_person_multi_values(self, person):
         # mv.property: 3/phone number 16/ringer 5/address 4/e-mail address
+        # 13/instant message, 46/social profile, 22/web-page etc.
         query = """
             SELECT mv.UID as mvid, mv.property as mvtype,
                    mv.label as mvlabel, mv.value as mval,
@@ -277,66 +372,50 @@ class ABPersonToRDF(object):
             WHERE mv.record_id=?
             ORDER BY 1;
         """
+
         last_mv_uid = None
+        current_prop_relation = None
+        current_prop_func = None
+        vcard_categ = None
+        curPropDict = None
+
         cur = self.db_connection.cursor()
 
         for row in cur.execute(query, (person.id,)):
             uid = row[0]
+            isNewValue = uid != last_mv_uid
+
             prop_type = row[1]
-            if prop_type is None:
+
+            if isNewValue:
+                current_prop_relation, current_prop_func = _get_mv_property_type_qname(prop_type)
+                if not current_prop_relation:
+                    curPropDict = None
+                    continue
+
+                curPropDict = {}
+                person.multivalues[(uid, current_prop_relation)] = curPropDict
+
+                prop_category_label = row[4]
+                vcard_categ = translate_category_label(prop_category_label)
+                if vcard_categ:
+                    curPropDict['vcard:category'] = vcard_categ
+
+            elif not current_prop_relation:
                 continue
 
-            prop_val = row[3] if row[3] else row[5]
-            if not prop_val:
-                continue
+            mval = row[3]
+            mv_subval = row[5]
+            assert(mval or mv_subval)
 
-            prop_class_number = row[2]
-            prop_class_label = row[4]
-            mv_class = multi_value_prop_class_qname(prop_class_number,
-                                                    prop_class_label)
-
-            mv_key = 'multival:' + str(uid)
-            if mv_key not in person:
-                person[mv_key] = {}
-
-            mv_obj = person[mv_key]
-
-            if prop_type == 3:
-                # process phone number
-                phone_uri = self._to_telephone_uri(prop_val)
-
-                mv_obj['mv_relation_name'] = 'vcard:hasTelephone'
-                mv_obj['vcard:hasValue'] = phone_uri
-                mv_obj['rdfs:label'] = format_literal(prop_val)
-                if mv_class:
-                    mv_obj['rdf:type'] = mv_class
-
-            elif prop_type == 4:
-                # e-mail address
-                email_uri = '<mailto:%s>' % (prop_val)
-                mv_obj['mv_relation_name'] = 'vcard:hasEmail'
-                mv_obj['vcard:hasValue'] = email_uri
-                if mv_class:
-                    mv_obj['rdf:type'] = mv_class
-
-            elif prop_type == 5:
-                # street address
-                if uid != last_mv_uid:
-                    mv_obj['mv_relation_name'] = 'vcard:hasAddress'
-                    if mv_class:
-                        mv_obj['rdf:type'] = mv_class
-
-                qn = get_multi_value_entry_qname(row[6])
-                if qn:
-                    mv_obj[qn] = format_literal(prop_val)
+            if mv_subval:
+                assert(row[6])
+                mve_relation = self._get_multi_value_entry_qname(row[6])
             else:
-                # unknown property
-                if uid != last_mv_uid:
-                    prop_name = 'abp:prop_%s' % (prop_type)
-                    mv_obj['mv_relation_name'] = prop_name
-                    if mv_class:
-                        mv_obj['rdf:type'] = mv_class
-                mv_obj['vcard:hasValue'] = format_literal(prop_val)
+                mve_relation = None
+
+            # call the custom function to set this property
+            current_prop_func(curPropDict, mval or mv_subval, mve_relation)
 
             last_mv_uid = uid
 
