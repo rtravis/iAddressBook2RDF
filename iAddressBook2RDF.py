@@ -37,10 +37,15 @@ def qname_to_uri(rel):
     return rel
 
 
+try:
+    unicode_constructor = unicode
+except NameError:
+    unicode_constructor = str
+
 def format_literal(s):
     if s is None:
         return ''
-    s = s.replace("\\", "\\\\")
+    s = unicode_constructor(s).replace("\\", "\\\\")
     s = s.replace("\"", "\\\"")
     s = s.replace("\n", "\\n")
     return '"%s"' % (s)
@@ -84,7 +89,7 @@ ab_person_column_map = {
     'ModificationDate' : 'vcard:rev',
     'CompositeNameFallback' : 'abp:CompositeNameFallback',
     'ExternalIdentifier' : 'abp:ExternalIdentifier',
-    'ExternalModificationTag' : 'abp:ExternalModificationTag',
+    'ExternalModificationTag' : None,
     'ExternalUUID' : 'abp:ExternalUUID',
     'StoreID' : 'abp:StoreID',
     'DisplayName' : 'abp:DisplayName',
@@ -97,7 +102,17 @@ ab_person_column_map = {
     'ImageURI' : 'vcard:hasPhoto',
     'IsPreferredName' : None,
     'guid' : 'abp:x-abuid',
-    'PhonemeData' : 'abp:PhonemeData'
+    'PhonemeData' : 'abp:PhonemeData',
+    'AlternateBirthday' : 'abp:AlternateBirthday',
+    'MapsData' : 'abp:MapsData',
+    'FirstPronunciation' : 'abp:FirstPronunciation',
+    'MiddlePronunciation' : 'abp:MiddlePronunciation',
+    'LastPronunciation' : 'abp:LastPronunciation',
+    'OrganizationPhonetic' : 'abp:OrganizationPhonetic',
+    'OrganizationPronunciation' : 'abp:OrganizationPronunciation',
+    'PreviousFamilyName' : 'abp:PreviousFamilyName',
+    'PreferredLikenessSource' : 'abp:PreferredLikenessSource',
+    'PreferredPersonaIdentifier' : 'abp:PreferredPersonaIdentifier'
 }
 
 
@@ -299,17 +314,19 @@ class ABPersonToRDF(object):
             return
 
         if relation == 'abp:PersonLink':
+            # col_val points to an entry in the ABPersonLink table
             if col_val == -1:
                 return
-            else:
-                # col_val points to an entry in the ABPersonLink table
-                col_val = str(col_val)
 
         # convert Apple date fields to ISO 8601 date representation
         if relation == 'vcard:rev':
             col_val = apple_date_to_iso_8601(col_val, True)
         elif relation == 'vcard:bday':
             col_val = apple_date_to_iso_8601(col_val, False)
+
+        if relation in ['vcard:hasPhoto']:
+            person.values[relation] = format_uri(col_val)
+            return
 
         # set the property
         person.values[relation] = format_literal(col_val)
@@ -420,6 +437,38 @@ class ABPersonToRDF(object):
             last_mv_uid = uid
 
 
+def find_default_database():
+    from glob import glob
+    search_dir = None
+    if sys.platform.startswith('win'):
+        try:
+            from win32com.shell import shellcon, shell
+            search_dir = "%s/%s" % (
+                shell.SHGetFolderPath(0, shellcon.CSIDL_APPDATA, 0, 0),
+                'Apple Computer/MobileSync/Backup')
+        except ImportError:
+            return None
+    elif sys.platform.startswith('darwin'):
+        import os
+        home = os.getenv('HOME')
+        if not home:
+            return None
+        search_dir = "%s/%s" % (home,
+                'Library/Application Support/MobileSync/Backup')
+
+    if not search_dir:
+        return None
+
+    folder_glob = '%s/*/%s' % (search_dir,
+                               '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
+    gl = glob(folder_glob)
+    if not gl:
+        folder_glob = '%s/*/31/%s' % (search_dir,
+                                      '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
+
+    return gl[0] if gl else None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                 description='Convert contacts from an iOS AddressBook to N-Triples.')
@@ -430,32 +479,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     if not args.input:
-        if sys.platform.startswith('win'):
-            try:
-                from win32com.shell import shellcon, shell
-                from glob import glob
-                folder_glob = '%s/%s/*/%s' % (
-                    shell.SHGetFolderPath(0, shellcon.CSIDL_APPDATA, 0, 0),
-                    'Apple Computer/MobileSync/Backup',
-                    '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
-                gl = glob(folder_glob)
-                args.input = gl[0] if gl else None
-            except ImportError:
-                pass
-        elif sys.platform.startswith('darwin'):
-            import os
-            home = os.getenv('HOME')
-            if home:
-                from glob import glob
-                folder_glob = '%s/%s/*/%s' % (
-                    home,
-                    'Library/Application Support/MobileSync/Backup',
-                    '31bb7ba8914766d4ba40d6dfb6113c8b614be442')
-                gl = glob(folder_glob)
-                args.input = gl[0] if gl else None
-
-    if not args.input:
-        parser.error('Missing input file!')
+        args.input = find_default_database()
+        if not args.input:
+            parser.error('Missing input file!')
 
     converter = ABPersonToRDF(args.input, args.output)
     converter.process_ab_records()
