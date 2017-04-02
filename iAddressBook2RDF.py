@@ -65,6 +65,62 @@ def apple_date_to_iso_8601(adt, is_timestamp=True):
     return '--%02d-%02d' % (dt.month, dt.day)
 
 
+def get_local_trunk_prefix_for_country_code(code):
+    if not code:
+        return ""
+
+    if code[0] == "1":
+        # North American Numbering Plan
+        return "1"
+    elif code[0] == "7":
+        # Russian world
+        return "8"
+    elif code == "36":
+        # Hungary
+        return "06"
+    elif code in ["420", "45", "372", "30", "39", "371", "352", "356", "377",
+                  "977", "47", "968", "48", "351", "378", "34", "3906698" ]:
+        # no trunk prefix
+        return ""
+    else:
+        # most of Africa, Asia and Europe
+        return "0"
+
+
+def normalize_phone_number(phoneNo, countryCallingCode=None):
+    phoneNo = unicode_constructor(phoneNo).lower()
+    phoneNo = phoneNo.translate({ord(c) : None for c in u"<>()-\u2011 \t\n\u00a0\u202a\u202c"})
+    if phoneNo.startswith("tel:"):
+        phoneNo = phoneNo[4:]
+
+    isSpecial = len(phoneNo) < 5 or "*" in phoneNo or "#" in phoneNo
+
+    if not phoneNo.translate({ord(c) : None for c in u"+*#"}).isdigit():
+        return None
+
+    isInternational = False
+
+    calling_prefixes = ['0011', '000', '001', '010', '011', '00', '+']
+    for i in calling_prefixes:
+        if phoneNo.startswith(i):
+            phoneNo = phoneNo[len(i):]
+            isInternational = True
+
+    if not isInternational:
+        isInternational = len(phoneNo) >= 11
+
+    if not isInternational and not isSpecial and countryCallingCode:
+        trunk = get_local_trunk_prefix_for_country_code(countryCallingCode)
+        if phoneNo.startswith(trunk):
+            phoneNo = countryCallingCode + phoneNo[len(trunk):]
+            isInternational = True
+
+    if isInternational and not isSpecial:
+        return "+" + phoneNo
+    else:
+        return phoneNo
+
+
 """ map ABPerson table columns to RDF predicates """
 ab_person_column_map = {
     'ROWID' : None,
@@ -133,18 +189,13 @@ def get_object_kind_qname(nkey):
 
 
 def _to_telephone_uri(phoneNo):
-    phoneNo = phoneNo.replace(' ', '');
-    if isinstance(phoneNo, bytes):
-        phoneNo = phoneNo.replace(u'\xc2\xa0', '');
-    else:
-        phoneNo = phoneNo.replace(u'\xa0', '');
-    return '<tel:%s>' % (phoneNo)
+    return '<tel:%s>' % (normalize_phone_number(phoneNo))
 
 
 def _process_has_telephone(objPropDict, val, _):
     # process phone number
     objPropDict['vcard:hasValue'] = _to_telephone_uri(val)
-    objPropDict['rdfs:label'] = format_literal(val)
+    # objPropDict['rdfs:label'] = format_literal(val)
 
 
 def _process_has_email(objPropDict, val, _):
@@ -225,7 +276,7 @@ def translate_category_label(categ_label):
 
 
 
-class ABPerson():
+class ABPerson(object):
     def __init__(self, person_id=None):
         self.id = person_id
         self.values = {} # single values (birthday, first name, organization, etc.)
@@ -234,16 +285,24 @@ class ABPerson():
     def __str__(self, *args, **kwargs):
         return object.__str__(self, *args, **kwargs)
 
-    def generate_full_name(self):
+    def generate_formatted_name(self):
         fn = ''
         if 'vcard:given-name' in self.values:
-            fn += self.values['vcard:given-name'].strip('"')
+            fn = self.values['vcard:given-name'].strip('"')
         if fn:
             fn += ' '
+
+        if 'vcard:additional-name' in self.values:
+            fn += self.values['vcard:additional-name'].strip('"')
+        if fn:
+            fn += ' '
+
         if 'vcard:family-name' in self.values:
             fn += self.values['vcard:family-name'].strip('"')
+
         if not fn and 'vcard:organization-name' in self.values:
             fn += self.values['vcard:organization-name'].strip('"')
+
         fn = fn.strip()
         if fn:
             self.values['vcard:fn'] = format_literal(fn)
@@ -289,7 +348,7 @@ class ABPersonToRDF(object):
                 self._process_ab_person_column(col, row[i], person)
 
             self._process_person_multi_values(person)
-            person.generate_full_name()
+            person.generate_formatted_name()
 
             person.output_ntriples(self.out, self.rand_tag)
 
