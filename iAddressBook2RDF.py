@@ -13,46 +13,27 @@
 
 import argparse
 import datetime
+import rdflib
 import sqlite3
 import sys
 
+from _functools import partial
+from rdflib.namespace import Namespace, NamespaceManager
+from PhoneNumberUtils import normalize_phone_number
 
-qnames_prefix_map = {
-    'rdf' : 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-    'rdfs' : 'http://www.w3.org/2000/01/rdf-schema#',
-    'abp' : 'http://www.apple.com/ABPerson#',
-    'vcard' : 'http://www.w3.org/2006/vcard/ns#',
-    'gn' : 'http://www.geonames.org/ontology#'
-}
+# global variables section
+_rdf = Namespace('http://www.w3.org/1999/02/22-rdf-syntax-ns#')
+_rdfs = Namespace('http://www.w3.org/2000/01/rdf-schema#')
+_abp = Namespace('http://www.apple.com/ABPerson#')
+_vcard = Namespace('http://www.w3.org/2006/vcard/ns#')
+_gn = Namespace('http://www.geonames.org/ontology#')
 
-
-def qname_to_uri(rel):
-    p = rel.partition(':')
-    if p[1] == ':' and p[0] in qnames_prefix_map:
-        return '<%s%s>' % (qnames_prefix_map[p[0]], p[2])
-    if not rel.startswith('<'):
-        rel = '<' + rel
-    if not rel.endswith('>'):
-        rel = rel + '>'
-    return rel
-
-
-try:
-    unicode_constructor = unicode
-except NameError:
-    unicode_constructor = str
-
-def format_literal(s):
-    if s is None:
-        return ''
-    s = unicode_constructor(s).replace("\\", "\\\\")
-    s = s.replace("\"", "\\\"")
-    s = s.replace("\n", "\\n")
-    return '"%s"' % (s)
-
-
-def format_uri(s):
-    return '<' + s + '>'
+_namespace_manager = NamespaceManager(rdflib.Graph())
+_namespace_manager.bind('rdf', _rdf)
+_namespace_manager.bind('rdfs', _rdfs)
+_namespace_manager.bind('abp', _abp)
+_namespace_manager.bind('vcard', _vcard)
+_namespace_manager.bind('gn', _gn)
 
 
 # convert Apple date fields to ISO 8601 date representation
@@ -65,221 +46,165 @@ def apple_date_to_iso_8601(adt, is_timestamp=True):
     return '--%02d-%02d' % (dt.month, dt.day)
 
 
-def get_local_trunk_prefix_for_country_code(code):
-    if not code:
-        return ""
-
-    if code[0] == "1":
-        # North American Numbering Plan
-        return "1"
-    elif code[0] == "7":
-        # Russian world
-        return "8"
-    elif code == "36":
-        # Hungary
-        return "06"
-    elif code in ["420", "45", "372", "30", "39", "371", "352", "356", "377",
-                  "977", "47", "968", "48", "351", "378", "34", "3906698" ]:
-        # no trunk prefix
-        return ""
-    else:
-        # most of Africa, Asia and Europe
-        return "0"
-
-
-def normalize_phone_number(phoneNo, countryCallingCode=None):
-    phoneNo = unicode_constructor(phoneNo).lower()
-    phoneNo = phoneNo.translate({ord(c) : None for c in u"<>()-\u2011 \t\n\u00a0\u202a\u202c"})
-    if phoneNo.startswith("tel:"):
-        phoneNo = phoneNo[4:]
-
-    isSpecial = len(phoneNo) < 5 or "*" in phoneNo or "#" in phoneNo
-
-    if not phoneNo.translate({ord(c) : None for c in u"+*#"}).isdigit():
-        return None
-
-    isInternational = False
-
-    calling_prefixes = ['0011', '000', '001', '010', '011', '00', '+']
-    for i in calling_prefixes:
-        if phoneNo.startswith(i):
-            phoneNo = phoneNo[len(i):]
-            isInternational = True
-
-    if not isInternational:
-        isInternational = len(phoneNo) >= 11
-
-    if not isInternational and not isSpecial and countryCallingCode:
-        trunk = get_local_trunk_prefix_for_country_code(countryCallingCode)
-        if phoneNo.startswith(trunk):
-            phoneNo = countryCallingCode + phoneNo[len(trunk):]
-            isInternational = True
-
-    if isInternational and not isSpecial:
-        return "+" + phoneNo
-    else:
-        return phoneNo
-
-
 """ map ABPerson table columns to RDF predicates """
 ab_person_column_map = {
     'ROWID' : None,
-    'First' : 'vcard:given-name',
-    'Last' : 'vcard:family-name',
-    'Middle' : 'vcard:additional-name',
-    'FirstPhonetic' : 'abp:FirstPhonetic',
-    'MiddlePhonetic' : 'abp:MiddlePhonetic',
-    'LastPhonetic' : 'abp:LastPhonetic',
-    'Organization' : 'vcard:organization-name',
-    'Department' : 'vcard:organizational-unit',
-    'Note' : 'vcard:note',
-    'Kind' : 'abp:Kind',
-    'Birthday' : 'vcard:bday',
-    'JobTitle' : 'vcard:title',
-    'Nickname' : 'vcard:nickname',
-    'Prefix' : 'vcard:honorific-prefix',
-    'Suffix' : 'vcard:honorific-suffix',
+    'First' : _vcard['given-name'],
+    'Last' : _vcard['family-name'],
+    'Middle' : _vcard['additional-name'],
+    'FirstPhonetic' : _abp.FirstPhonetic,
+    'MiddlePhonetic' : _abp.MiddlePhonetic,
+    'LastPhonetic' : _abp.LastPhonetic,
+    'Organization' : _vcard['organization-name'],
+    'Department' : _vcard['organizational-unit'],
+    'Note' : _vcard.note,
+    'Kind' : _abp.Kind,
+    'Birthday' : _vcard.bday,
+    'JobTitle' : _vcard.title,
+    'Nickname' : _vcard.nickname,
+    'Prefix' : _vcard['honorific-prefix'],
+    'Suffix' : _vcard['honorific-suffix'],
     'FirstSort' : None,
     'LastSort' : None,
     'CreationDate' : None,
-    'ModificationDate' : 'vcard:rev',
-    'CompositeNameFallback' : 'abp:CompositeNameFallback',
-    'ExternalIdentifier' : 'abp:ExternalIdentifier',
+    'ModificationDate' : _vcard.rev,
+    'CompositeNameFallback' : _abp.CompositeNameFallback,
+    'ExternalIdentifier' : _abp.ExternalIdentifier,
     'ExternalModificationTag' : None,
-    'ExternalUUID' : 'abp:ExternalUUID',
-    'StoreID' : 'abp:StoreID',
-    'DisplayName' : 'abp:DisplayName',
-    'ExternalRepresentation' : 'abp:ExternalRepresentation',
+    'ExternalUUID' : _abp.ExternalUUID,
+    'StoreID' : _abp.StoreID,
+    'DisplayName' : _abp.DisplayName,
+    'ExternalRepresentation' : _abp.ExternalRepresentation,
     'FirstSortSection' : None,
     'LastSortSection' : None,
     'FirstSortLanguageIndex' : None,
     'LastSortLanguageIndex' : None,
-    'PersonLink' : 'abp:PersonLink',
-    'ImageURI' : 'vcard:hasPhoto',
+    'PersonLink' : _abp.PersonLink,
+    'ImageURI' : _vcard.hasPhoto,
     'IsPreferredName' : None,
-    'guid' : 'abp:x-abuid',
-    'PhonemeData' : 'abp:PhonemeData',
-    'AlternateBirthday' : 'abp:AlternateBirthday',
-    'MapsData' : 'abp:MapsData',
-    'FirstPronunciation' : 'abp:FirstPronunciation',
-    'MiddlePronunciation' : 'abp:MiddlePronunciation',
-    'LastPronunciation' : 'abp:LastPronunciation',
-    'OrganizationPhonetic' : 'abp:OrganizationPhonetic',
-    'OrganizationPronunciation' : 'abp:OrganizationPronunciation',
-    'PreviousFamilyName' : 'abp:PreviousFamilyName',
-    'PreferredLikenessSource' : 'abp:PreferredLikenessSource',
-    'PreferredPersonaIdentifier' : 'abp:PreferredPersonaIdentifier'
+    'guid' : _abp['x-abuid'],
+    'PhonemeData' : _abp.PhonemeData,
+    'AlternateBirthday' : _abp.AlternateBirthday,
+    'MapsData' : _abp.MapsData,
+    'FirstPronunciation' : _abp.FirstPronunciation,
+    'MiddlePronunciation' : _abp.MiddlePronunciation,
+    'LastPronunciation' : _abp.LastPronunciation,
+    'OrganizationPhonetic' : _abp.OrganizationPhonetic,
+    'OrganizationPronunciation' : _abp.OrganizationPronunciation,
+    'PreviousFamilyName' : _abp.PreviousFamilyName,
+    'PreferredLikenessSource' : _abp.PreferredLikenessSource,
+    'PreferredPersonaIdentifier' : _abp.PreferredPersonaIdentifier
 }
 
 
 """ map ABPerson.Kind values vcard:Kind subclasses """
 ab_object_kind_map = {
-    0 : 'vcard:Individual',
-    1 : 'vcard:Organization'
-    # 2? : 'vcard:Group',
-    # 3? : 'vcard:Location'
+    0 : _vcard.Individual,
+    1 : _vcard.Organization
+    # 2? : _vcard.Group,
+    # 3? : _vcard.Location
 }
 
 
-def get_object_kind_qname(nkey):
+def get_vcard_object_kind(nkey):
     try:
         return ab_object_kind_map[nkey]
     except KeyError:
-        return 'vcard:Kind'
+        return _vcard.Kind
 
 
 def _to_telephone_uri(phoneNo):
-    return '<tel:%s>' % (normalize_phone_number(phoneNo))
+    return rdflib.URIRef('tel:%s' % (normalize_phone_number(phoneNo)))
 
 
 def _process_has_telephone(objPropDict, val, _):
     # process phone number
-    objPropDict['vcard:hasValue'] = _to_telephone_uri(val)
-    # objPropDict['rdfs:label'] = format_literal(val)
+    objPropDict[_vcard.hasValue] = _to_telephone_uri(val)
 
 
 def _process_has_email(objPropDict, val, _):
     # e-mail address
-    objPropDict['vcard:hasValue'] = '<mailto:%s>' % (val)
+    objPropDict[_vcard.hasValue] = rdflib.URIRef('mailto:%s' % (val))
 
 
 def _process_url(objPropDict, val, _):
-    objPropDict['vcard:hasValue'] = format_uri(val)
+    objPropDict[_vcard.hasValue] = rdflib.URIRef(val)
 
 
 def _process_literal(objPropDict, val, _):
-    objPropDict['vcard:hasValue'] = format_literal(val)
+    objPropDict[_vcard.hasValue] = rdflib.Literal(val)
 
 
 def _process_literal_date(objPropDict, val, _):
-    objPropDict['vcard:hasValue'] = format_literal(apple_date_to_iso_8601(val, False))
+    objPropDict[_vcard.hasValue] = rdflib.Literal(apple_date_to_iso_8601(val, False))
 
 
 def _process_multi_value_entry(objPropDict, val, mve_relation):
     assert(mve_relation)
-    if mve_relation == 'vcard:url':
-        objPropDict[mve_relation] = format_uri(val)
+    if mve_relation == _vcard.url:
+        objPropDict[mve_relation] = rdflib.URIRef(val)
     else:
-        objPropDict[mve_relation] = format_literal(val)
+        objPropDict[mve_relation] = rdflib.Literal(val)
 
 
-def _get_mv_property_type_qname(mv_property):
+def _process_unknown_multi_value_entry(rel1, objPropDict, val, _):
+    objPropDict[rel1] = rdflib.Literal(val)
+
+
+def _get_mv_property_type_info(mv_property):
     prop_type_map = {
-        3 : ('vcard:hasTelephone', _process_has_telephone),
-        4 : ('vcard:hasEmail', _process_has_email),
-        5 : ('vcard:hasAddress', _process_multi_value_entry),
-        16 : ('vcard:sound', _process_literal),
-        22 : ('vcard:url', _process_url),
-        23 : ('abp:relatedName', _process_literal),
-        12 : ('abp:relatedDate', _process_literal_date),
-        46 : ('abp:socialProfile', _process_multi_value_entry),
-        13 : ('vcard:hasInstantMessage', _process_multi_value_entry)
+        3 : (_vcard.hasTelephone, _process_has_telephone),
+        4 : (_vcard.hasEmail, _process_has_email),
+        5 : (_vcard.hasAddress, _process_multi_value_entry),
+        16 : (_vcard.sound, _process_literal),
+        22 : (_vcard.url, _process_url),
+        23 : (_abp.relatedName, _process_literal),
+        12 : (_abp.relatedDate, _process_literal_date),
+        46 : (_abp.socialProfile, _process_multi_value_entry),
+        13 : (_vcard.hasInstantMessage, _process_multi_value_entry)
     }
 
     try:
         return prop_type_map[mv_property]
     except KeyError:
-        return 'abp:x-prop_%s' % (mv_property)
-
-
-def output_triple(out, subj, pred, obj):
-    if obj.startswith('<') and obj.endswith('>'):
-        pass
-    elif obj.startswith('"') and obj.endswith('"'):
-        pass
-    elif obj.startswith('_:'):
-        pass
-    else:
-        obj = qname_to_uri(obj)
-
-    triple = '%s %s %s .' % (
-                            subj,
-                            qname_to_uri(pred),
-                            obj)
-
-    # hack for Python 2 / 3 compatibility
-    try:
-        out.write(('%s\n' % (triple)).encode('UTF-8'))
-    except TypeError:
-        out.write('%s\n' % (triple))
+        rel1 = _abp['x-prop_%s' % (mv_property)]
+        return (rel1, partial(_process_unknown_multi_value_entry, rel1))
 
 
 def translate_category_label(categ_label):
     # category label could be like: _$!<Mobile>!$_, _$!<Work>!$_, etc.
     # category labels like: iPhone, Twitter, Facebook etc. are not translated
     if not categ_label:
-        return None
-    if len(categ_label) > 8 and categ_label.startswith('_$!<'):
+        return []
+    if categ_label.startswith('_$!<') and categ_label.endswith('>!$_'):
         categ_label = categ_label[4:-4]
 
-    return '"' + categ_label + '"'
+    types_categories = []
+    if categ_label == "Mobile":
+        types_categories.append((_rdf.type, _vcard.Cell))
+    elif categ_label == "Home":
+        types_categories.append((_rdf.type, _vcard.Home))
+    elif categ_label == "WorkFAX":
+        types_categories.append((_rdf.type, _vcard.Work))
+        types_categories.append((_rdf.type, _vcard.Fax))
+    elif categ_label == "iPhone":
+        types_categories.append((_rdf.type, _vcard.Cell))
+        types_categories.append((_vcard.category, rdflib.Literal(categ_label)))
+    elif categ_label == "Pager":
+        types_categories.append((_rdf.type, _vcard.Pager))
+    elif categ_label == "Work":
+        types_categories.append((_rdf.type, _vcard.Work))
+    else:
+        types_categories.append((_vcard.category, rdflib.Literal(categ_label)))
 
+    return types_categories
 
 
 class ABPerson(object):
     def __init__(self, person_id=None):
         self.id = person_id
-        self.values = {} # single values (birthday, first name, organization, etc.)
+        self.name = {} # name components: family name, given name, title, etc.
+        self.values = {} # single values (birthday, formatted name, organization, etc.)
         self.multivalues = {} # multi values (phone#s, emails, addresses, etc.)
 
     def __str__(self, *args, **kwargs):
@@ -287,40 +212,46 @@ class ABPerson(object):
 
     def generate_formatted_name(self):
         fn = ''
-        if 'vcard:given-name' in self.values:
-            fn = self.values['vcard:given-name'].strip('"')
-        if fn:
-            fn += ' '
+        if _vcard['given-name'] in self.name:
+            fn = self.name[_vcard['given-name']]
+            if fn:
+                fn += ' '
 
-        if 'vcard:additional-name' in self.values:
-            fn += self.values['vcard:additional-name'].strip('"')
-        if fn:
-            fn += ' '
+        if _vcard['additional-name'] in self.name:
+            fn += self.name[_vcard['additional-name']]
+            if fn:
+                fn += ' '
 
-        if 'vcard:family-name' in self.values:
-            fn += self.values['vcard:family-name'].strip('"')
+        if _vcard['family-name'] in self.name:
+            fn += self.name[_vcard['family-name']]
 
-        if not fn and 'vcard:organization-name' in self.values:
-            fn += self.values['vcard:organization-name'].strip('"')
+        if not fn and _vcard['organization-name'] in self.values:
+            fn += self.values[_vcard['organization-name']]
 
         fn = fn.strip()
         if fn:
-            self.values['vcard:fn'] = format_literal(fn)
+            self.values[_vcard.fn] = rdflib.Literal(fn)
 
-    def output_ntriples(self, out, bnode_tag):
-        person_bnode = '_:%sp%d' % (bnode_tag, self.id)
+    def output_triples(self, rdfGraph):
+        person_bnode = rdflib.BNode()
         for k in self.values:
-            output_triple(out, person_bnode, k, self.values[k])
+            rdfGraph.add((person_bnode, k, self.values[k]))
+
+        if self.name:
+            name_bnode = rdflib.BNode()
+            rdfGraph.add((person_bnode, _vcard.hasName, name_bnode))
+            for k in self.name:
+                rdfGraph.add((name_bnode, k, self.name[k]))
 
         for k in self.multivalues:
-            mvid, mvrel = k
+            _, mvrel = k
             mvprops = self.multivalues[k]
             if not mvprops:
                 continue
-            mvbnode = person_bnode + 'm' + str(mvid)
-            output_triple(out, person_bnode, mvrel, mvbnode)
+            mvbnode = rdflib.BNode()
+            rdfGraph.add((person_bnode, mvrel, mvbnode))
             for m in mvprops:
-                output_triple(out, mvbnode, m, mvprops[m])
+                rdfGraph.add((mvbnode, m, mvprops[m]))
 
 
 class ABPersonToRDF(object):
@@ -328,17 +259,22 @@ class ABPersonToRDF(object):
         self.db_connection = sqlite3.connect(db_name)
         self.ab_multi_value_entry_map = self._build_multi_value_entry_map(
                                                             self.db_connection)
-        self.rand_tag = ('%x' % (abs(hash(db_name))))[:8]
         if output_file_name is not None:
             self.out = open(output_file_name, 'wb')
         else:
-            self.out = sys.stdout
+            try:
+                self.out = sys.stdout.buffer
+            except AttributeError:
+                self.out = sys.stdout
 
     """ process Address Book records """
     def process_ab_records(self):
         cur = self.db_connection.cursor()
         cur.execute('select * from ABPerson')
         col_names = [k[0] for k in cur.description]
+
+        rdfGraph = rdflib.Graph()
+        rdfGraph.namespace_manager = _namespace_manager
 
         for row in cur:
             person_id = int(row[0])
@@ -349,8 +285,9 @@ class ABPersonToRDF(object):
 
             self._process_person_multi_values(person)
             person.generate_formatted_name()
+            person.output_triples(rdfGraph)
 
-            person.output_ntriples(self.out, self.rand_tag)
+        rdfGraph.serialize(self.out, format='n3', encoding="UTF-8")
 
     """ process the field of an ABPerson record, store results in person  """
     @staticmethod
@@ -364,53 +301,52 @@ class ABPersonToRDF(object):
             return
         if relation is None:
             return
-
-        if relation == 'abp:Kind':
-            person.values['rdf:type'] = get_object_kind_qname(col_val)
+        if relation == _abp.Kind:
+            person.values[_rdf.type] = get_vcard_object_kind(col_val)
             return
 
-        if relation == 'abp:StoreID' and col_val == 0:
+        if relation == _abp.StoreID and col_val == 0:
             return
 
-        if relation == 'abp:PersonLink':
+        if relation == _abp.PersonLink:
             # col_val points to an entry in the ABPersonLink table
             if col_val == -1:
                 return
 
+        # process a name component
+        if relation in [_vcard['given-name'], _vcard['family-name'],
+                        _vcard['additional-name'], _vcard.title,
+                        _vcard['honorific-prefix'], _vcard['honorific-suffix'],
+                        _abp.PreviousFamilyName]:
+            person.name[relation] = rdflib.Literal(col_val)
+            return
+
         # convert Apple date fields to ISO 8601 date representation
-        if relation == 'vcard:rev':
+        if relation == _vcard.rev:
             col_val = apple_date_to_iso_8601(col_val, True)
-        elif relation == 'vcard:bday':
+        elif relation == _vcard.bday:
             col_val = apple_date_to_iso_8601(col_val, False)
 
-        if relation in ['vcard:hasPhoto']:
-            person.values[relation] = format_uri(col_val)
+        if relation in [_vcard.hasPhoto]:
+            person.values[relation] = rdflib.URIRef(col_val)
             return
 
         # set the property
-        person.values[relation] = format_literal(col_val)
-
-
-    def _line_out(self, s):
-        # hack for Python 2 / 3 compatibility
-        try:
-            self.out.write(('%s\n' % (s)).encode('UTF-8'))
-        except TypeError:
-            self.out.write('%s\n' % (s))
+        person.values[relation] = rdflib.Literal(col_val)
 
     def _build_multi_value_entry_map(self, db_connection):
         query = 'select ROWID, value from ABMultiValueEntryKey'
         cur = db_connection.cursor()
         remap = {
-            'Street': 'vcard:street-address',
-            'Country': 'vcard:country-name',
-            'ZIP': 'vcard:postal-code',
-            'City': 'vcard:locality',
-            'State': 'vcard:region',
-            'CountryCode': 'gn:countryCode',
-            'username': 'abp:username',
-            'service': 'abp:service',
-            'url': 'vcard:url'
+            'Street': _vcard['street-address'],
+            'Country': _vcard['country-name'],
+            'ZIP': _vcard['postal-code'],
+            'City': _vcard.locality,
+            'State': _vcard.region,
+            'CountryCode': _gn.countryCode,
+            'username': _abp.username,
+            'service': _abp.service,
+            'url': _vcard.url
         }
 
         mve_map = {}
@@ -418,15 +354,14 @@ class ABPersonToRDF(object):
             try:
                 mve_map[row[0]] = remap[row[1]]
             except KeyError:
-                mve_map[row[0]] = 'abp:' + row[1]
+                mve_map[row[0]] = _abp[row[1]]
         return mve_map
 
-    def _get_multi_value_entry_qname(self, nkey):
+    def _get_multi_value_entry_rel(self, nkey):
         try:
             return self.ab_multi_value_entry_map[nkey]
         except KeyError:
             return None
-
 
     def _process_person_multi_values(self, person):
         # mv.property: 3/phone number 16/ringer 5/address 4/e-mail address
@@ -452,7 +387,6 @@ class ABPersonToRDF(object):
         last_mv_uid = None
         current_prop_relation = None
         current_prop_func = None
-        vcard_categ = None
         curPropDict = None
 
         cur = self.db_connection.cursor()
@@ -464,7 +398,7 @@ class ABPersonToRDF(object):
             prop_type = row[1]
 
             if isNewValue:
-                current_prop_relation, current_prop_func = _get_mv_property_type_qname(prop_type)
+                current_prop_relation, current_prop_func = _get_mv_property_type_info(prop_type)
                 if not current_prop_relation:
                     curPropDict = None
                     continue
@@ -473,9 +407,8 @@ class ABPersonToRDF(object):
                 person.multivalues[(uid, current_prop_relation)] = curPropDict
 
                 prop_category_label = row[4]
-                vcard_categ = translate_category_label(prop_category_label)
-                if vcard_categ:
-                    curPropDict['vcard:category'] = vcard_categ
+                for pred1, obj1 in translate_category_label(prop_category_label):
+                    curPropDict[pred1] = obj1
 
             elif not current_prop_relation:
                 continue
@@ -486,7 +419,7 @@ class ABPersonToRDF(object):
 
             if mv_subval:
                 assert(row[6])
-                mve_relation = self._get_multi_value_entry_qname(row[6])
+                mve_relation = self._get_multi_value_entry_rel(row[6])
             else:
                 mve_relation = None
 
